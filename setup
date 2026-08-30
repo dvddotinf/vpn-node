@@ -1,0 +1,240 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "$(id -u)" -ne 0 ]; then
+    exec sudo "$0" "$@"
+fi
+
+if [ "$#" -ne 1 ]; then
+    echo "usage: $0 <domain>" >&2
+    exit 2
+fi
+
+DOMAIN="$1"
+
+. /etc/os-release
+
+if [ "$ID" != "ubuntu" ] || [ "$VERSION_ID" != "24.04" ]; then
+    echo "vpn-node: only Ubuntu 24.04 is supported for now" >&2
+    exit 1
+fi
+
+export DEBIAN_FRONTEND=noninteractive
+
+echo "==> Installing AmneziaWG dependencies"
+
+apt-get update
+apt-get install -y \
+    curl \
+    debian-keyring \
+    debian-archive-keyring \
+    apt-transport-https \
+    software-properties-common \
+    python3-launchpadlib \
+    gnupg2 \
+    "linux-headers-$(uname -r)" \
+    nftables
+
+echo "==> Adding Amnezia PPA"
+
+add-apt-repository -y ppa:amnezia/ppa
+apt-get update
+
+echo "==> Installing AmneziaWG"
+
+apt-get install -y \
+    amneziawg-dkms \
+    amneziawg-tools
+
+echo "==> Loading kernel module"
+
+modprobe amneziawg
+
+echo "==> Verifying installation"
+
+command -v awg >/dev/null
+command -v awg-quick >/dev/null
+
+ip link add awg-test type amneziawg
+ip link delete awg-test
+
+echo
+echo "AmneziaWG is ready"
+echo "awg:       $(command -v awg)"
+echo "awg-quick: $(command -v awg-quick)"
+
+echo "==> Installing uv"
+
+if ! command -v uv >/dev/null 2>&1; then
+    curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+fi
+
+uv --version
+
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+
+echo "==> Installing vpn-node"
+
+uv sync --frozen --no-editable --project "$ROOT"
+
+ln -sfn \
+    "$ROOT/.venv/bin/vpn-node" \
+    /usr/local/bin/vpn-node
+
+vpn-node --help >/dev/null
+
+echo "==> Installing Caddy"
+
+if ! command -v caddy >/dev/null 2>&1; then
+    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' |
+        gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+
+    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
+        > /etc/apt/sources.list.d/caddy-stable.list
+
+    chmod o+r /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+    chmod o+r /etc/apt/sources.list.d/caddy-stable.list
+
+    apt-get update
+    apt-get install -y caddy
+fi
+
+echo "==> Configuring HTTPS"
+
+install -d -m 0755 /usr/share/vpn-node/assets
+
+install -m 0644 \
+    "$ROOT/src/vpn_node/static/status.html" \
+    /usr/share/vpn-node/status.html
+
+install -m 0644 \
+    "$ROOT/src/vpn_node/static/style.css" \
+    /usr/share/vpn-node/assets/style.css
+
+install -m 0644 \
+    "$ROOT/src/vpn_node/static/status.js" \
+    /usr/share/vpn-node/assets/status.js
+
+cat > /etc/caddy/Caddyfile <<EOF
+$DOMAIN {
+    handle /status {
+        root * /usr/share/vpn-node
+        rewrite * /status.html
+        file_server
+    }
+
+    handle /assets/status.css {
+        root * /usr/share/vpn-node
+        file_server
+    }
+
+    handle /assets/status.js {
+        root * /usr/share/vpn-node
+        file_server
+    }
+
+    handle {
+        reverse_proxy 127.0.0.1:8080
+    }
+}
+EOF
+
+caddy validate --config /etc/caddy/Caddyfile
+systemctl enable caddy.service
+systemctl restart caddy.service
+
+VPN_INTERFACE="awg0"
+VPN_SUBNET="10.77.0.0/24"
+
+WAN_INTERFACE="$(
+    ip -4 route show default |
+        awk '$1 == "default" { print $5; exit }'
+)"
+
+if [ -z "$WAN_INTERFACE" ]; then
+    echo "vpn-node: failed to detect default network interface" >&2
+    exit 1
+fi
+
+echo "==> Configuring IPv4 forwarding"
+
+cat > /etc/sysctl.d/99-vpn-node.conf <<EOF
+net.ipv4.ip_forward = 1
+EOF
+
+sysctl -w net.ipv4.ip_forward=1
+
+echo "==> Configuring firewall"
+
+install -d -m 755 /etc/vpn-node
+printf '%s\n' "$DOMAIN" > /etc/vpn-node/domain
+install -d -m 755 /etc/vpn-node/firewall.d
+install -d -m 755 /usr/local/libexec
+
+cat > /etc/vpn-node/firewall.nft <<EOF
+flush table inet vpn_node
+
+add chain inet vpn_node user_forward
+
+add chain inet vpn_node forward {
+    type filter hook forward priority 0;
+    policy accept;
+}
+
+add rule inet vpn_node forward jump user_forward
+
+add rule inet vpn_node forward \
+    iifname "$VPN_INTERFACE" accept
+
+add rule inet vpn_node forward \
+    oifname "$VPN_INTERFACE" \
+    ct state established,related accept
+
+add rule inet vpn_node forward \
+    oifname "$VPN_INTERFACE" drop
+
+add chain inet vpn_node postrouting {
+    type nat hook postrouting priority 100;
+    policy accept;
+}
+
+add rule inet vpn_node postrouting \
+    ip saddr $VPN_SUBNET \
+    oifname "$WAN_INTERFACE" \
+    masquerade
+
+include "/etc/vpn-node/firewall.d/*.nft"
+EOF
+
+cat > /usr/local/libexec/vpn-node-firewall <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+nft list table inet vpn_node >/dev/null 2>&1 ||
+    nft add table inet vpn_node
+
+nft -f /etc/vpn-node/firewall.nft
+EOF
+
+chmod 755 /usr/local/libexec/vpn-node-firewall
+
+cat > /etc/systemd/system/vpn-node-firewall.service <<'EOF'
+[Unit]
+Description=vpn-node firewall
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/libexec/vpn-node-firewall
+ExecReload=/usr/local/libexec/vpn-node-firewall
+ExecStop=-/usr/sbin/nft delete table inet vpn_node
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable vpn-node-firewall.service
+systemctl restart vpn-node-firewall.service

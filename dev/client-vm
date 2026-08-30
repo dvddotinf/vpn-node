@@ -1,0 +1,251 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+STATE="$ROOT/.vm/client"
+
+BASE="$ROOT/.vm/ubuntu.img"
+DISK="$STATE/disk.qcow2"
+SEED="$STATE/seed.img"
+PIDFILE="$STATE/qemu.pid"
+
+IMAGE_URL="https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-amd64.img"
+
+SSH_HOST="127.0.0.1"
+SSH_PORT=2223
+SSH_USER="dev"
+SSH_KEY="${VPN_NODE_VM_SSH_KEY:-$HOME/.ssh/id_ed25519}"
+
+ssh_opts=(
+    -o StrictHostKeyChecking=no
+    -o UserKnownHostsFile=/dev/null
+    -o LogLevel=ERROR
+    -i "$SSH_KEY"
+    -p "$SSH_PORT"
+)
+
+is_running() {
+    test -f "$PIDFILE" || return 1
+
+    local pid
+    pid="$(cat "$PIDFILE")"
+
+    if kill -0 "$pid" 2>/dev/null; then
+        return 0
+    fi
+
+    rm -f "$PIDFILE"
+    return 1
+}
+
+require_init() {
+    if [ ! -f "$DISK" ] || [ ! -f "$SEED" ]; then
+        echo "client vm is not initialized; run: $0 init" >&2
+        exit 1
+    fi
+}
+
+wait_for_ssh() {
+    printf 'waiting for ssh'
+
+    for _ in $(seq 1 60); do
+        if ssh "${ssh_opts[@]}" "$SSH_USER@$SSH_HOST" true 2>/dev/null; then
+            echo
+            return 0
+        fi
+
+        printf '.'
+        sleep 1
+    done
+
+    echo
+    echo "ssh did not become ready" >&2
+    return 1
+}
+
+case "${1:-}" in
+    init)
+        if is_running; then
+            echo "client vm is running; stop it first" >&2
+            exit 1
+        fi
+
+        mkdir -p "$STATE"
+
+        if [ ! -f "$BASE" ]; then
+            echo "downloading Ubuntu 24.04 cloud image..."
+            curl -fL "$IMAGE_URL" -o "$BASE"
+        fi
+
+        if [ -f "$DISK" ] || [ -f "$SEED" ]; then
+            echo "client vm is already initialized" >&2
+            exit 1
+        fi
+
+        qemu-img create \
+            -f qcow2 \
+            -F qcow2 \
+            -b "$BASE" \
+            "$DISK" \
+            16G
+
+        sed "s|SSH_KEY|$(cat "$SSH_KEY.pub")|" \
+            "$ROOT/dev/cloud-init.yaml" \
+            > "$STATE/user-data"
+
+        printf '%s\n' \
+            'instance-id: vpn-client-dev' \
+            'local-hostname: vpn-client' \
+            > "$STATE/meta-data"
+
+        cloud-localds \
+            "$SEED" \
+            "$STATE/user-data" \
+            "$STATE/meta-data"
+
+        echo "client vm initialized"
+        ;;
+
+    up)
+        require_init
+
+        if is_running; then
+            echo "client vm is already running"
+            exit 0
+        fi
+
+        if ss -ltn | grep -q ":$SSH_PORT "; then
+            echo "host port $SSH_PORT is already in use" >&2
+            exit 1
+        fi
+
+        qemu-system-x86_64 \
+            -enable-kvm \
+            -machine accel=kvm \
+            -cpu host \
+            -m 2048 \
+            -smp 2 \
+            -display none \
+            -daemonize \
+            -pidfile "$PIDFILE" \
+            -drive "file=$DISK,if=virtio" \
+            -drive "file=$SEED,format=raw,if=virtio" \
+            -nic "user,model=virtio-net-pci,hostfwd=tcp:$SSH_HOST:$SSH_PORT-:22"
+
+        wait_for_ssh
+        echo "client vm ready: ssh $SSH_USER@$SSH_HOST -p $SSH_PORT"
+        ;;
+
+    down)
+        if ! is_running; then
+            echo "client vm is not running"
+            exit 0
+        fi
+
+        pid="$(cat "$PIDFILE")"
+        kill "$pid"
+
+        for _ in $(seq 1 30); do
+            if ! kill -0 "$pid" 2>/dev/null; then
+                rm -f "$PIDFILE"
+                echo "client vm stopped"
+                exit 0
+            fi
+
+            sleep 0.2
+        done
+
+        kill -9 "$pid" 2>/dev/null || true
+        rm -f "$PIDFILE"
+        ;;
+
+    reset)
+        "$0" down
+
+        rm -f \
+            "$DISK" \
+            "$SEED" \
+            "$STATE/user-data" \
+            "$STATE/meta-data"
+
+        "$0" init
+        ;;
+
+    ssh)
+        require_init
+
+        if ! is_running; then
+            echo "client vm is not running" >&2
+            exit 1
+        fi
+
+        exec ssh "${ssh_opts[@]}" "$SSH_USER@$SSH_HOST"
+        ;;
+
+    setup)
+        require_init
+
+        if ! is_running; then
+            echo "client vm is not running" >&2
+            exit 1
+        fi
+
+        ssh "${ssh_opts[@]}" "$SSH_USER@$SSH_HOST" 'bash -s' <<'EOF'
+set -euo pipefail
+
+sudo cloud-init status --wait
+
+sudo apt-get update
+sudo apt-get install -y \
+    software-properties-common \
+    python3-launchpadlib \
+    gnupg2 \
+    "linux-headers-$(uname -r)"
+
+sudo add-apt-repository -y ppa:amnezia/ppa
+sudo apt-get update
+
+sudo apt-get install -y \
+    amneziawg-dkms \
+    amneziawg-tools
+
+sudo modprobe amneziawg
+
+sudo ip link add awg-test type amneziawg
+sudo ip link delete awg-test
+
+echo "AmneziaWG client is ready"
+EOF
+        ;;
+
+    copy)
+        require_init
+
+        if [ "$#" -ne 2 ]; then
+            echo "usage: $0 copy <file>" >&2
+            exit 2
+        fi
+
+        scp \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o LogLevel=ERROR \
+            -i "$SSH_KEY" \
+            -P "$SSH_PORT" \
+            "$2" \
+            "$SSH_USER@$SSH_HOST:~/"
+        ;;
+
+    status)
+        if is_running; then
+            echo "running pid=$(cat "$PIDFILE") ssh=$SSH_HOST:$SSH_PORT"
+        else
+            echo "stopped"
+        fi
+        ;;
+
+    *)
+        echo "usage: $0 {init|up|down|reset|ssh|setup|copy|status}" >&2
+        exit 2
+        ;;
+esac

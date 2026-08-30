@@ -1,0 +1,104 @@
+# Secrets
+.env
+.env.local
+.env.*.local
+.envrc
+.netrc
+.npmrc
+.pypirc
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.json
+secrets/
+
+# Version control
+.git/
+.hg/
+.svn/
+
+# Editors / IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Python
+.venv/
+venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+*.pyc
+*.pyo
+*.egg-info/
+
+# JavaScript / TypeScript
+node_modules/
+.next/
+.nuxt/
+.svelte-kit/
+.parcel-cache/
+.turbo/
+coverage/
+
+# Rust
+target/
+
+# Go / PHP / Ruby dependencies
+vendor/
+.bundle/
+
+# Java / Kotlin / Gradle
+.gradle/
+out/
+
+# .NET
+bin/
+obj/
+
+# Native / C / C++
+CMakeFiles/
+cmake-build-*/
+*.o
+*.obj
+*.so
+*.dylib
+*.dll
+
+# Common build output
+build/
+dist/
+.cache/
+tmp/
+temp/
+
+# Swift
+.build/
+DerivedData/
+
+# Terraform / IaC
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+.serverless/
+.aws-sam/
+
+# Logs and local databases
+*.log
+*.sqlite
+*.sqlite3
+
+# VM
+.vm/
