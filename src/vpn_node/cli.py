@@ -196,9 +196,9 @@ def install_service() -> None:
         """\
 [Unit]
 Description=vpn-node
-After=network-online.target vpn-node-firewall.service
+After=network-online.target vpn-node-firewall.service awg-quick@awg0.service
 Wants=network-online.target
-Requires=vpn-node-firewall.service
+Requires=vpn-node-firewall.service awg-quick@awg0.service
 
 [Service]
 Type=simple
@@ -212,7 +212,7 @@ WantedBy=multi-user.target
 
     subprocess.run(["systemctl", "daemon-reload"], check=True)
     subprocess.run(
-        ["systemctl", "enable", "vpn-node.service"],
+        ["systemctl", "enable", "awg-quick@awg0.service", "vpn-node.service"],
         check=True,
     )
 
@@ -221,20 +221,6 @@ def serve() -> None:
     require_initialized()
 
     instance = load_instance(INSTANCE_PATH)
-
-    render()
-
-    subprocess.run(
-        ["awg-quick", "down", instance.interface],
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-
-    subprocess.run(
-        ["awg-quick", "up", instance.interface],
-        check=True,
-    )
 
     traffic_stop = threading.Event()
     traffic_thread = threading.Thread(
@@ -257,11 +243,6 @@ def serve() -> None:
     finally:
         traffic_stop.set()
         traffic_thread.join(timeout=2)
-
-        subprocess.run(
-            ["awg-quick", "down", instance.interface],
-            check=False,
-        )
 
 
 def run() -> None:

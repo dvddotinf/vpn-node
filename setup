@@ -123,7 +123,7 @@ $DOMAIN {
         file_server
     }
 
-    handle /assets/status.css {
+    handle /assets/style.css {
         root * /usr/share/vpn-node
         file_server
     }
