@@ -32,6 +32,16 @@ AWG_CONFIG_DIR = Path("/etc/amnezia/amneziawg")
 
 ENROLLMENT_LIFETIME = 24 * 60 * 60
 
+def format_bytes(value: int) -> str:
+    units = ("B", "KiB", "MiB", "GiB", "TiB")
+
+    size = float(value)
+    for unit in units:
+        if size < 1024 or unit == units[-1]:
+            return f"{size:.2f} {unit}" if unit != "B" else f"{value} B"
+        size /= 1024
+
+    raise AssertionError
 
 def require_root() -> None:
     if os.geteuid() != 0:
@@ -297,6 +307,35 @@ def update() -> None:
     print("vpn-node updated")
 
 
+def traffic() -> None:
+    require_root()
+    require_initialized()
+
+    db = Database(DATABASE_PATH)
+    rows = db.traffic_summary()
+
+    total_received = sum(row[2] for row in rows)
+    total_sent = sum(row[3] for row in rows)
+
+    print(f"{'NAME':<16} {'ADDRESS':<16} {'DOWNLOAD':>12} {'UPLOAD':>12} {'TOTAL':>12}")
+
+    for name, address, received, sent in rows:
+        print(
+            f"{name:<16} {address:<16} "
+            f"{format_bytes(sent):>12} "
+            f"{format_bytes(received):>12} "
+            f"{format_bytes(sent + received):>12}"
+        )
+
+    print()
+    print(
+        f"{'TOTAL':<33} "
+        f"{format_bytes(total_sent):>12} "
+        f"{format_bytes(total_received):>12} "
+        f"{format_bytes(total_sent + total_received):>12}"
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="vpn-node")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -306,6 +345,7 @@ def main() -> None:
     commands.add_parser("run")
     commands.add_parser("update")
     commands.add_parser("serve")
+    commands.add_parser("traffic")
     enroll_parser = commands.add_parser("enroll")
     enroll_parser.add_argument("name")
 
@@ -324,3 +364,5 @@ def main() -> None:
         enroll(args.name)
     elif args.command == "update":
         update()
+    elif args.command == "traffic":
+        traffic()

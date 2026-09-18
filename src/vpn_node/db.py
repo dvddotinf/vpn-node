@@ -296,3 +296,28 @@ class Database:
             return None
 
         return row["received_bytes"], row["sent_bytes"]
+
+    def traffic_summary(self) -> list[tuple[str, str, int, int]]:
+        rows = self.connection.execute(
+            """
+            SELECT
+                p.name,
+                p.address,
+                COALESCE(SUM(t.received_bytes), 0) AS received_bytes,
+                COALESCE(SUM(t.sent_bytes), 0) AS sent_bytes
+            FROM peers p
+            LEFT JOIN traffic_hourly t ON t.peer_name = p.name
+            GROUP BY p.id
+            ORDER BY p.id
+            """
+        ).fetchall()
+
+        return [
+            (
+                row["name"],
+                row["address"],
+                row["received_bytes"],
+                row["sent_bytes"],
+            )
+            for row in rows
+        ]
