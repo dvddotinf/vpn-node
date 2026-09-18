@@ -335,6 +335,41 @@ def traffic() -> None:
         f"{format_bytes(total_sent + total_received):>12}"
     )
 
+def remove(name: str) -> None:
+    require_root()
+    require_initialized()
+
+    db = Database(DATABASE_PATH)
+
+    if not db.remove_peer(name):
+        raise SystemExit(f"vpn-node: peer {name!r} not found")
+
+    render()
+
+    instance = load_instance(INSTANCE_PATH)
+    sync_interface(instance.interface)
+
+    print(f"peer {name!r} removed")
+
+
+def rename(old_name: str, new_name: str) -> None:
+    require_root()
+    require_initialized()
+
+    db = Database(DATABASE_PATH)
+
+    try:
+        renamed = db.rename_peer(old_name, new_name)
+    except ValueError as error:
+        raise SystemExit(f"vpn-node: {error}")
+
+    if not renamed:
+        raise SystemExit(f"vpn-node: peer {old_name!r} not found")
+
+    render()
+
+    print(f"peer {old_name!r} renamed to {new_name!r}")
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="vpn-node")
@@ -346,8 +381,16 @@ def main() -> None:
     commands.add_parser("update")
     commands.add_parser("serve")
     commands.add_parser("traffic")
+
     enroll_parser = commands.add_parser("enroll")
     enroll_parser.add_argument("name")
+
+    remove_parser = commands.add_parser("remove")
+    remove_parser.add_argument("name")
+
+    rename_parser = commands.add_parser("rename")
+    rename_parser.add_argument("old_name")
+    rename_parser.add_argument("new_name")
 
     args = parser.parse_args()
 
@@ -366,3 +409,7 @@ def main() -> None:
         update()
     elif args.command == "traffic":
         traffic()
+    elif args.command == "remove":
+        remove(args.name)
+    elif args.command == "rename":
+        rename(args.old_name, args.new_name)

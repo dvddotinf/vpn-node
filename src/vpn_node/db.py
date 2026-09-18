@@ -77,12 +77,80 @@ class Database:
             address=address,
         )
 
-    def remove_peer(self, name: str) -> None:
-        self.connection.execute(
-            "DELETE FROM peers WHERE name = ?",
-            (name,),
-        )
-        self.connection.commit()
+    def remove_peer(self, name: str) -> bool:
+        self.connection.execute("BEGIN IMMEDIATE")
+
+        try:
+            peer = self.connection.execute(
+                "SELECT public_key FROM peers WHERE name = ?",
+                (name,),
+            ).fetchone()
+
+            if peer is None:
+                self.connection.rollback()
+                return False
+
+            self.connection.execute(
+                "DELETE FROM traffic_hourly WHERE peer_name = ?",
+                (name,),
+            )
+            self.connection.execute(
+                "DELETE FROM traffic_state WHERE public_key = ?",
+                (peer["public_key"],),
+            )
+            self.connection.execute(
+                "DELETE FROM peers WHERE name = ?",
+                (name,),
+            )
+
+            self.connection.commit()
+            return True
+
+        except Exception:
+            self.connection.rollback()
+            raise
+
+    def rename_peer(self, old_name: str, new_name: str) -> bool:
+        self.connection.execute("BEGIN IMMEDIATE")
+
+        try:
+            peer = self.connection.execute(
+                "SELECT 1 FROM peers WHERE name = ?",
+                (old_name,),
+            ).fetchone()
+
+            if peer is None:
+                self.connection.rollback()
+                return False
+
+            conflict = self.connection.execute(
+                """
+                SELECT 1 FROM peers WHERE name = ?
+                UNION ALL
+                SELECT 1 FROM enrollments WHERE name = ?
+                LIMIT 1
+                """,
+                (new_name, new_name),
+            ).fetchone()
+
+            if conflict is not None:
+                raise ValueError(f"name {new_name!r} already exists")
+
+            self.connection.execute(
+                "UPDATE peers SET name = ? WHERE name = ?",
+                (new_name, old_name),
+            )
+            self.connection.execute(
+                "UPDATE traffic_hourly SET peer_name = ? WHERE peer_name = ?",
+                (new_name, old_name),
+            )
+
+            self.connection.commit()
+            return True
+
+        except Exception:
+            self.connection.rollback()
+            raise
 
     def add_enrollment(
         self,
