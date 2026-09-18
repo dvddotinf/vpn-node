@@ -253,6 +253,49 @@ def run() -> None:
         check=True,
     )
 
+def update() -> None:
+    require_root()
+
+    root = Path("/usr/local/bin/vpn-node").resolve().parents[2]
+
+    subprocess.run(
+        ["git", "-C", root, "pull", "--ff-only"],
+        check=True,
+    )
+
+    subprocess.run(
+        [
+            "uv", "sync",
+            "--frozen",
+            "--no-editable",
+            "--reinstall-package", "vpn-node",
+            "--project", root,
+        ],
+        check=True,
+    )
+
+    static = root / "src/vpn_node/static"
+
+    subprocess.run(
+        ["install", "-m", "0644", static / "status.html", "/usr/share/vpn-node/status.html"],
+        check=True,
+    )
+    subprocess.run(
+        ["install", "-m", "0644", static / "style.css", "/usr/share/vpn-node/assets/style.css"],
+        check=True,
+    )
+    subprocess.run(
+        ["install", "-m", "0644", static / "status.js", "/usr/share/vpn-node/assets/status.js"],
+        check=True,
+    )
+
+    subprocess.run(
+        ["systemctl", "restart", "vpn-node.service"],
+        check=True,
+    )
+
+    print("vpn-node updated")
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="vpn-node")
@@ -261,6 +304,7 @@ def main() -> None:
     commands.add_parser("init")
     commands.add_parser("render")
     commands.add_parser("run")
+    commands.add_parser("update")
     commands.add_parser("serve")
     enroll_parser = commands.add_parser("enroll")
     enroll_parser.add_argument("name")
@@ -278,3 +322,5 @@ def main() -> None:
         serve()
     elif args.command == "enroll":
         enroll(args.name)
+    elif args.command == "update":
+        update()
